@@ -70,7 +70,7 @@ Function request bodies are limited to 4.5 MB, so file bytes never pass through 
 
 ## Deploy
 
-The Vercel project `agent-hamkke-relay` deploys from `main`. To deploy by hand:
+The Vercel project is `agent-hamkke-relay` (linked in `.vercel/`). To deploy:
 
 ```bash
 vercel deploy --prod
