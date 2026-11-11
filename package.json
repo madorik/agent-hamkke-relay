@@ -11,7 +11,8 @@
     "start": "tsx src/dev.ts",
     "db": "docker compose up -d --wait",
     "import-sqlite": "tsx scripts/import-sqlite.ts",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "deploy": "sh scripts/deploy.sh"
   },
   "dependencies": {
     "@vercel/blob": "^2.9.0",

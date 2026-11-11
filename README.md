@@ -70,13 +70,15 @@ Function request bodies are limited to 4.5 MB, so file bytes never pass through 
 
 ## Deploy
 
-The Vercel project is `agent-hamkke-relay` (linked in `.vercel/`). To deploy:
+The Vercel project is `agent-hamkke-relay` (linked in `.vercel/`). To deploy the committed `HEAD` to production:
 
 ```bash
-vercel deploy --prod
+npm run deploy
 ```
 
-The schema is created on first request (`CREATE TABLE IF NOT EXISTS` under an advisory lock). There is no separate migration step yet.
+This uploads an export of `HEAD` without git metadata. On the Hobby plan, Vercel blocks deployments whose commits name a co-author who isn't a project member (such as a `Co-Authored-By` trailer), and a plain `vercel deploy --prod` from the repo gets blocked.
+
+The schema is created on first request and its version is recorded in `schema_version`. When you change the schema, bump `SCHEMA_VERSION` in `src/db.ts`. One instance then applies it under an advisory lock, and every other instance skips the DDL. Running `CREATE INDEX IF NOT EXISTS` on every cold start would lock tables and deadlock with live writes.
 
 To move data from an old SQLite relay:
 

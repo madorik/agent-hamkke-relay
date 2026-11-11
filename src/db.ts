@@ -11,7 +11,9 @@ export type Row = Record<string, string | number | boolean | null>
 export type Param = string | number | boolean | null | string[]
 
 const LOCAL_URL = 'postgres://hamkke:hamkke@localhost:5434/hamkke' // docker-compose.yml
-const url = process.env.DATABASE_URL ?? (process.env.VERCEL ? undefined : LOCAL_URL)
+// pg 는 sslmode=require 를 지금도 verify-full 로 다룬다(곧 바뀐다는 경고를 찍는다). 그 뜻대로 적어 둔다.
+const strict = (u: string | undefined) => u?.replace(/([?&]sslmode=)require\b/, '$1verify-full')
+const url = strict(process.env.DATABASE_URL ?? (process.env.VERCEL ? undefined : LOCAL_URL))
 if (!url) throw new Error('DATABASE_URL is not set')
 
 /** 일반 쿼리(Neon 은 pgbouncer 를 거치는 주소) */
@@ -21,7 +23,7 @@ pool.on('error', (e) => console.error('[db] idle client error', e))
 attachDatabasePool(pool)
 
 /** LISTEN 은 pgbouncer(transaction 모드)를 거치면 안 된다 */
-export const directUrl = process.env.DATABASE_URL_UNPOOLED ?? url
+export const directUrl = strict(process.env.DATABASE_URL_UNPOOLED) ?? url
 
 const toPg = (sql: string) => {
   let i = 0
@@ -213,16 +215,34 @@ CREATE TABLE IF NOT EXISTS agent_activities (
 /** 에이전트가 붙어 있나(SQL 식). users 를 u 로 부른 쿼리에 넣는다. */
 export const AGENT_ONLINE = `EXISTS (SELECT 1 FROM agent_conns c WHERE c.user_id = u.id AND c.seen_at > now() - interval '90 seconds')`
 
+// SCHEMA 를 바꾸면 올린다. 버전이 같으면 DDL 을 아예 돌리지 않는다:
+// CREATE INDEX IF NOT EXISTS 는 인덱스가 있어도 표를 잠가서, 새 인스턴스가 뜰 때마다 돌리면 쓰기와 교착이 난다.
+const SCHEMA_VERSION = 1
+
+async function schemaVersion(q: Pick<pg.PoolClient, 'query'>): Promise<number> {
+  const t = await q.query(`SELECT to_regclass('schema_version') AS t`)
+  if (!t.rows[0].t) return 0
+  return (await q.query('SELECT version FROM schema_version')).rows[0]?.version ?? 0
+}
+
 let ready: Promise<void> | null = null
 
-/** 처음 한 번 표를 만든다. 인스턴스 여럿이 동시에 떠도 잠금으로 하나씩 한다. */
+/** 표가 최신인지 보고, 아니면 한 인스턴스만 잠금을 잡고 만든다. */
 export function ensureSchema(): Promise<void> {
   ready ??= (async () => {
+    if ((await schemaVersion(pool)) >= SCHEMA_VERSION) return
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(4248001)')
+      if ((await schemaVersion(client)) >= SCHEMA_VERSION) {
+        await client.query('COMMIT')
+        return
+      }
       await client.query(SCHEMA)
+      await client.query('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)')
+      await client.query('DELETE FROM schema_version')
+      await client.query('INSERT INTO schema_version (version) VALUES ($1)', [SCHEMA_VERSION])
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK').catch(() => {})
