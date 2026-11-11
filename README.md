@@ -85,3 +85,9 @@ npm run import-sqlite -- /path/to/relay.db [/path/to/files]
 ```
 
 The import targets whatever `DATABASE_URL` and file storage are configured. It skips rows that already exist, so it is safe to run again.
+
+## License
+
+[AGPL-3.0](LICENSE). Copyright (C) 2026 madorik.
+
+You can run, modify, and share the relay. If you run a modified version as a network service, you must make its source available to the people who use it. The desktop app and connector in [agent-hamkke](https://github.com/madorik/agent-hamkke) are MIT-licensed.
