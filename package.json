@@ -1,0 +1,28 @@
+{
+  "name": "agent-hamkke-relay",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "tsx watch src/dev.ts",
+    "start": "tsx src/dev.ts",
+    "db": "docker compose up -d --wait",
+    "import-sqlite": "tsx scripts/import-sqlite.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.9.0",
+    "@vercel/functions": "^3.11.1",
+    "pg": "^8.23.1",
+    "ws": "^8.22.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

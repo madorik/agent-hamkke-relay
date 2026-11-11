@@ -1,0 +1,18 @@
+# 로컬 개발용 Postgres. 운영은 Neon(Vercel Marketplace).
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: hamkke
+      POSTGRES_PASSWORD: hamkke
+      POSTGRES_DB: hamkke
+    ports:
+      - '127.0.0.1:5434:5432'
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U hamkke']
+      interval: 2s
+      retries: 30
+volumes:
+  pg:
