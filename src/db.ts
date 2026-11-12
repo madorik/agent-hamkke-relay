@@ -210,6 +210,32 @@ CREATE TABLE IF NOT EXISTS agent_activities (
   at BIGINT NOT NULL,
   PRIMARY KEY (user_id, channel_id)
 );
+
+-- v2: 자리 비움. away_since 가 있으면 그때부터 자리를 비웠다(데스크톱이 입력·화면 잠금을 보고 알리거나, 사람이 직접 켠다).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS away_since BIGINT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS away_note TEXT;
+
+-- v2: 결정 요청. 그 사람이 판단해야 할 일을 사람이 없어도 남겨 둔다.
+-- source: agent(그 사람의 에이전트가 남김) | mention(자리에 없고 에이전트도 꺼진 사람을 @로 불러 서버가 남김)
+-- status: open | decided(사람이 정함) | dismissed(사람이 넘김) | resolved(에이전트가 스스로 처리함)
+CREATE TABLE IF NOT EXISTS decisions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  channel_id TEXT NOT NULL REFERENCES channels(id),
+  source TEXT NOT NULL,
+  question TEXT NOT NULL,
+  context TEXT NOT NULL DEFAULT '',
+  options TEXT,                  -- 고를 수 있는 답(JSON 배열)
+  requester_id TEXT,             -- 결정을 기다리는 사람
+  message_id TEXT,               -- 이 결정이 생긴 메시지(@요청 등)
+  status TEXT NOT NULL,
+  answer TEXT,
+  decided_at BIGINT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_user ON decisions (user_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS decisions_message ON decisions (user_id, message_id) WHERE message_id IS NOT NULL;
 `
 
 /** 에이전트가 붙어 있나(SQL 식). users 를 u 로 부른 쿼리에 넣는다. */
@@ -217,7 +243,7 @@ export const AGENT_ONLINE = `EXISTS (SELECT 1 FROM agent_conns c WHERE c.user_id
 
 // SCHEMA 를 바꾸면 올린다. 버전이 같으면 DDL 을 아예 돌리지 않는다:
 // CREATE INDEX IF NOT EXISTS 는 인덱스가 있어도 표를 잠가서, 새 인스턴스가 뜰 때마다 돌리면 쓰기와 교착이 난다.
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 async function schemaVersion(q: Pick<pg.PoolClient, 'query'>): Promise<number> {
   const t = await q.query(`SELECT to_regclass('schema_version') AS t`)

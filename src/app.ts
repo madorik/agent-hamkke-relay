@@ -10,6 +10,7 @@ import type {
   AgentKind,
   Artifact,
   Channel,
+  Decision,
   Locale,
   Member,
   Message,
@@ -24,7 +25,7 @@ import type {
 import { AGENT_ONLINE, all, ensureSchema, one, run, tx, type Row } from './db.js'
 import { listen, onBus, publish, unlisten, type BusEvent } from './bus.js'
 import { storage } from './storage.js'
-import { defaultChannelTitle, errorText, pickLocale, systemText, type ErrorCode } from './i18n.js'
+import { decisionNotice, defaultChannelTitle, errorText, pickLocale, systemText, type ErrorCode } from './i18n.js'
 
 const MAX_FILE = 25 * 1024 * 1024
 const PERMISSION_TTL = 10 * 60_000
@@ -95,6 +96,8 @@ function userOf(r: Row): User {
     agentKind: (r.agent_kind as AgentKind | null) ?? null,
     agentOnline: !!r.agent_online,
     autoApprove: !!r.auto_approve,
+    awaySince: r.away_since == null ? null : Number(r.away_since),
+    awayNote: (r.away_note as string | null) ?? '',
   }
 }
 
@@ -362,8 +365,17 @@ async function deliver(ev: BusEvent) {
         userId: ev.userId,
         agentOnline: !!u.agent_online,
         agentKind: (u.agent_kind as AgentKind | null) ?? null,
+        awaySince: u.away_since == null ? null : Number(u.away_since),
+        awayNote: (u.away_note as string | null) ?? '',
       }
       for (const c of targets()) if (peers.has(c.viewer.userId)) send(c, out)
+      return
+    }
+    case 'decision': {
+      const r = await one('SELECT * FROM decisions WHERE id = ?', ev.id)
+      if (!r) return
+      const decision = decisionOf(r)
+      for (const c of targets()) if (ownedBy(c, decision.userId)) send(c, { type: 'decision', decision })
       return
     }
     case 'user': {
@@ -594,6 +606,16 @@ route('PATCH', '/me', async ({ viewer, body }) => {
   const name = str(body.name).trim().slice(0, 30)
   if (name) await run('UPDATE users SET name = ? WHERE id = ?', name, viewer.userId)
   if (typeof body.autoApprove === 'boolean') await run('UPDATE users SET auto_approve = ? WHERE id = ?', Number(body.autoApprove), viewer.userId)
+  // 자리 비움: 켜면 지금부터(이미 비운 중이면 그 시각 그대로), 끄면 지운다
+  const awayChanged = typeof body.away === 'boolean' || typeof body.awayNote === 'string'
+  if (typeof body.away === 'boolean') {
+    if (body.away) await run('UPDATE users SET away_since = COALESCE(away_since, ?) WHERE id = ?', now(), viewer.userId)
+    else await run('UPDATE users SET away_since = NULL, away_note = NULL WHERE id = ?', viewer.userId)
+  }
+  if (typeof body.awayNote === 'string' && body.away !== false) {
+    await run('UPDATE users SET away_note = ? WHERE id = ?', body.awayNote.trim().slice(0, 60) || null, viewer.userId)
+  }
+  if (awayChanged) await publish({ t: 'presence', userId: viewer.userId })
   const user = userOf(await getUser(viewer.userId))
   // 내 화면과 내 에이전트가 바로 알도록(에이전트는 요청을 얼마나 조심해 처리할지 정한다)
   await publish({ t: 'user', userId: viewer.userId })
@@ -782,6 +804,7 @@ route('POST', '/channels/:id/messages', async ({ viewer, params, body }) => {
     })
     await publish({ t: 'message', id: row.id as string })
     await publish({ t: 'channel', id: channelId })
+    await recordAbsentMentions(row)
     return row
   })
   return msgOf(row)
@@ -830,7 +853,9 @@ route('POST', '/messages/:id/approve', async ({ viewer, params, body }) => {
     }
     await publish({ t: 'message', id: m.id as string })
     await publish({ t: 'channel', id: channelId })
-    return (await messageRow(m.id as string))!
+    const sent = (await messageRow(m.id as string))!
+    await recordAbsentMentions(sent)
+    return sent
   })
   return msgOf(row)
 })
@@ -904,7 +929,9 @@ route('POST', '/messages/:id/share', async ({ viewer, params }) => {
     await run('UPDATE channels SET updated_at = ? WHERE id = ?', t, channelId)
     await publish({ t: 'message', id: m.id as string })
     await publish({ t: 'channel', id: channelId })
-    return (await messageRow(m.id as string))!
+    const shared = (await messageRow(m.id as string))!
+    await recordAbsentMentions(shared)
+    return shared
   })
   return msgOf(row)
 })
@@ -919,6 +946,206 @@ route('POST', '/messages/:id/unshare', async ({ viewer, params }) => {
     return (await messageRow(m.id as string))!
   })
   return msgOf(row)
+})
+
+// ── 결정 요청 ─────────────────────────────────────────────────
+// 그 사람이 판단해야 할 일을, 사람이 자리에 없어도 남겨 둔다. 돌아오면 결정함에서 정하고,
+// 정한 답은 채널에 알리고(원하면) 그 사람의 에이전트가 이어서 처리한다.
+
+const DECISION_OPTIONS = 6
+
+function decisionOf(r: Row): Decision {
+  let options: string[] = []
+  try {
+    const v = JSON.parse((r.options as string) || '[]')
+    if (Array.isArray(v)) options = v.filter((x): x is string => typeof x === 'string')
+  } catch {
+    /* 비워 둔다 */
+  }
+  return {
+    id: r.id as string,
+    userId: r.user_id as string,
+    channelId: r.channel_id as string,
+    source: r.source as Decision['source'],
+    question: r.question as string,
+    context: (r.context as string) ?? '',
+    options,
+    requesterId: (r.requester_id as string | null) ?? null,
+    messageId: (r.message_id as string | null) ?? null,
+    status: r.status as Decision['status'],
+    answer: (r.answer as string | null) ?? null,
+    decidedAt: r.decided_at == null ? null : Number(r.decided_at),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  }
+}
+
+function cleanOptions(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const x of raw) {
+    const s = typeof x === 'string' ? x.trim().slice(0, 120) : ''
+    if (s && !out.includes(s)) out.push(s)
+    if (out.length >= DECISION_OPTIONS) break
+  }
+  return out
+}
+
+/**
+ * 자리에 없고 에이전트도 꺼진 사람을 @로 부른 채널 글은 그 사람의 결정함에 남긴다.
+ * 그 사람(이나 다시 켜진 에이전트)이 돌아와서 놓치지 않게. 같은 메시지는 한 번만 남는다.
+ */
+async function recordAbsentMentions(row: Row) {
+  if (row.visibility !== 'channel' || row.status !== 'sent' || row.kind === 'system') return
+  for (const userId of mentionsOf(row)) {
+    // 에이전트를 연결해 두었는데 꺼져 있거나(앱을 닫음 등), 에이전트 없이 자리를 비운 사람
+    const u = await one(
+      `SELECT u.id FROM users u WHERE u.id = ? AND NOT ${AGENT_ONLINE} AND (u.agent_kind IS NOT NULL OR u.away_since IS NOT NULL)`,
+      userId,
+    )
+    if (!u) continue
+    const id = randomUUID()
+    const t = now()
+    const n = await run(
+      `INSERT INTO decisions (id, user_id, channel_id, source, question, context, options, requester_id, message_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'mention', ?, '', NULL, ?, ?, 'open', ?, ?)
+       ON CONFLICT (user_id, message_id) WHERE message_id IS NOT NULL DO NOTHING`,
+      id,
+      userId,
+      row.channel_id as string,
+      String(row.body ?? '').slice(0, 2000),
+      (row.author_id as string | null) ?? null,
+      row.id as string,
+      t,
+      t,
+    )
+    if (n) await publish({ t: 'decision', id })
+  }
+}
+
+/** 내 결정 요청. 결정할 사람(사람 또는 그 사람의 에이전트)만 본다. */
+async function myDecision(id: string, viewer: Viewer): Promise<Row> {
+  const r = await one('SELECT * FROM decisions WHERE id = ?', id)
+  if (!r || r.user_id !== viewer.userId) throw new HttpError(404, 'decision_not_found')
+  return r
+}
+
+route('GET', '/decisions', async ({ viewer, query }) => {
+  const rows =
+    query.get('status') === 'all'
+      ? await all('SELECT * FROM decisions WHERE user_id = ? ORDER BY created_at DESC LIMIT 100', viewer.userId)
+      : await all(`SELECT * FROM decisions WHERE user_id = ? AND status = 'open' ORDER BY created_at DESC`, viewer.userId)
+  return rows.map(decisionOf)
+})
+
+// 에이전트가 마스터 판단이 필요한 일을 남긴다. 같은 메시지(message_id)에서 생긴 건 덮어 고친다.
+route('POST', '/decisions', async ({ viewer, body }) => {
+  if (viewer.kind !== 'agent') throw new HttpError(403, 'agents_only')
+  const channelId = str(body.channelId)
+  await requireMember(channelId, viewer)
+  const question = str(body.question).trim().slice(0, 1000)
+  if (!question) throw new HttpError(400, 'question_required')
+  const context = str(body.context).trim().slice(0, 4000)
+  const options = cleanOptions(body.options)
+  let messageId = str(body.messageId) || null
+  let requesterId = str(body.requesterId) || null
+  if (messageId) {
+    const m = await one('SELECT channel_id, author_id FROM messages WHERE id = ?', messageId)
+    if (!m || m.channel_id !== channelId) messageId = null
+    else if (!requesterId && m.author_id !== viewer.userId) requesterId = (m.author_id as string | null) ?? null
+  }
+  if (requesterId && !(await one('SELECT 1 FROM members WHERE channel_id = ? AND user_id = ?', channelId, requesterId))) requesterId = null
+  const t = now()
+  const existing = messageId ? await one('SELECT * FROM decisions WHERE user_id = ? AND message_id = ?', viewer.userId, messageId) : undefined
+  let id: string
+  if (existing) {
+    id = existing.id as string
+    if (existing.status === 'open') {
+      await run(
+        `UPDATE decisions SET source = 'agent', question = ?, context = ?, options = ?, requester_id = COALESCE(?, requester_id), updated_at = ? WHERE id = ?`,
+        question,
+        context,
+        JSON.stringify(options),
+        requesterId,
+        t,
+        id,
+      )
+    }
+  } else {
+    id = randomUUID()
+    await run(
+      `INSERT INTO decisions (id, user_id, channel_id, source, question, context, options, requester_id, message_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'agent', ?, ?, ?, ?, ?, 'open', ?, ?)`,
+      id,
+      viewer.userId,
+      channelId,
+      question,
+      context,
+      JSON.stringify(options),
+      requesterId,
+      messageId,
+      t,
+      t,
+    )
+  }
+  await publish({ t: 'decision', id })
+  return decisionOf((await one('SELECT * FROM decisions WHERE id = ?', id))!)
+})
+
+// 사람이 정한다. notify 면(기본) 정한 답을 채널에 알린다(기다리던 사람을 @로 부른다).
+route('POST', '/decisions/:id/decide', async ({ viewer, params, body, locale }) => {
+  requireHuman(viewer)
+  const first = await myDecision(params[0], viewer)
+  const answer = str(body.answer).trim().slice(0, 2000)
+  if (!answer) throw new HttpError(400, 'answer_required')
+  const notify = body.notify !== false
+  const channelId = first.channel_id as string
+  const out = await inChannel(channelId, async () => {
+    const r = await myDecision(params[0], viewer)
+    if (r.status !== 'open') throw new HttpError(409, 'decision_closed')
+    const t = now()
+    await run(`UPDATE decisions SET status = 'decided', answer = ?, decided_at = ?, updated_at = ? WHERE id = ?`, answer, t, t, r.id as string)
+    let message: Message | null = null
+    if (notify && (await membership(channelId, viewer))) {
+      const requester = r.requester_id && r.requester_id !== viewer.userId ? await one('SELECT name FROM users WHERE id = ?', r.requester_id) : undefined
+      const text = decisionNotice(locale, { mention: (requester?.name as string | undefined) ?? null, question: r.question as string, answer })
+      const row = await insertMessage({
+        channelId,
+        authorId: viewer.userId,
+        authorKind: 'human',
+        body: text,
+        mentions: await findMentions(channelId, viewer.userId, text),
+      })
+      await run('UPDATE channels SET updated_at = ? WHERE id = ?', t, channelId)
+      await publish({ t: 'message', id: row.id as string })
+      // 기다리던 사람에겐 알림일 뿐 그 사람이 정할 일이 아니라 결정함에 남기지 않는다
+      await publish({ t: 'channel', id: channelId })
+      message = msgOf(row, locale)
+    }
+    await publish({ t: 'decision', id: r.id as string })
+    return { decision: decisionOf((await one('SELECT * FROM decisions WHERE id = ?', r.id))!), message }
+  })
+  return out
+})
+
+// 사람이 넘긴다(결정할 필요 없음)
+route('POST', '/decisions/:id/dismiss', async ({ viewer, params }) => {
+  requireHuman(viewer)
+  const r = await myDecision(params[0], viewer)
+  if (r.status !== 'open') throw new HttpError(409, 'decision_closed')
+  await run(`UPDATE decisions SET status = 'dismissed', updated_at = ? WHERE id = ?`, now(), r.id as string)
+  await publish({ t: 'decision', id: r.id as string })
+  return decisionOf((await one('SELECT * FROM decisions WHERE id = ?', r.id))!)
+})
+
+// 에이전트가 스스로 처리해 닫는다(예: 다시 켜져서 요청에 답함). note 는 무엇을 했는지
+route('POST', '/decisions/:id/resolve', async ({ viewer, params, body }) => {
+  if (viewer.kind !== 'agent') throw new HttpError(403, 'agents_only')
+  const r = await myDecision(params[0], viewer)
+  if (r.status !== 'open') throw new HttpError(409, 'decision_closed')
+  await run(`UPDATE decisions SET status = 'resolved', answer = ?, updated_at = ? WHERE id = ?`, str(body.note).trim().slice(0, 2000) || null, now(), r.id as string)
+  await publish({ t: 'decision', id: r.id as string })
+  return decisionOf((await one('SELECT * FROM decisions WHERE id = ?', r.id))!)
 })
 
 // 문서

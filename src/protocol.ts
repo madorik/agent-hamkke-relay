@@ -31,6 +31,10 @@ export interface User {
   agentOnline: boolean
   /** 항상 모두 승인: 이 사람 에이전트의 메시지·문서·파일과 도구 실행을 확인 없이 바로 처리한다 */
   autoApprove: boolean
+  /** 자리를 비운 시각(ms). 자리에 있으면 null. 예전 중계 서버는 보내지 않는다 */
+  awaySince?: number | null
+  /** 자리 비움 한마디(예: '회의 중'). 없으면 '' */
+  awayNote?: string
 }
 
 export interface Member extends User {
@@ -149,6 +153,36 @@ export interface AgentActivity {
   at: number
 }
 
+/**
+ * 결정 요청: 그 사람이 판단해야 할 일. 사람이 자리에 없어도 남겨 두고, 돌아오면 결정함에서 정한다.
+ * - source 'agent': 그 사람의 에이전트가 남김(마스터 판단이 필요한 일)
+ * - source 'mention': 자리에 없고 에이전트도 꺼진 사람을 @로 불러 서버가 남김
+ */
+export type DecisionStatus = 'open' | 'decided' | 'dismissed' | 'resolved'
+
+export interface Decision {
+  id: string
+  /** 결정할 사람 */
+  userId: string
+  channelId: string
+  source: 'agent' | 'mention'
+  question: string
+  /** 판단에 필요한 맥락(마크다운) */
+  context: string
+  /** 고를 수 있는 답. 비어 있으면 직접 쓴다 */
+  options: string[]
+  /** 결정을 기다리는 사람 */
+  requesterId: string | null
+  /** 이 결정이 생긴 메시지(@요청 등) */
+  messageId: string | null
+  status: DecisionStatus
+  /** decided: 사람이 정한 답 / resolved: 에이전트가 남긴 처리 내용 */
+  answer: string | null
+  decidedAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
 export interface Approvals {
   messages: Message[]
   permissions: PermissionRequest[]
@@ -173,7 +207,17 @@ export type ServerEvent =
   | { type: 'channel'; channel: Channel }
   | { type: 'artifact'; artifact: Artifact }
   | { type: 'artifact_removed'; artifactId: string; channelId: string }
-  | { type: 'presence'; userId: string; agentOnline: boolean; agentKind: AgentKind | null }
+  | {
+      type: 'presence'
+      userId: string
+      agentOnline: boolean
+      agentKind: AgentKind | null
+      /** 자리 비움(예전 중계 서버는 보내지 않는다) */
+      awaySince?: number | null
+      awayNote?: string
+    }
+  /** 내 결정 요청이 생기거나 바뀜. 나의 사람·에이전트 연결에만 보낸다 */
+  | { type: 'decision'; decision: Decision }
   | { type: 'permission'; request: PermissionRequest }
   | { type: 'permission_verdict'; requestId: string; behavior: 'allow' | 'deny' }
   | { type: 'agent_activity'; activity: AgentActivity }

@@ -34,6 +34,10 @@ const ERRORS = {
     nothing_to_discard: () => '버릴 항목이 없어요',
     nothing_to_share: () => '공유할 에이전트 글이 없어요',
     nothing_to_unshare: () => '공유를 취소할 에이전트 글이 없어요',
+    decision_not_found: () => '결정 요청을 찾을 수 없어요',
+    decision_closed: () => '이미 처리한 결정 요청이에요',
+    question_required: () => '무엇을 결정해야 하는지 적어 주세요',
+    answer_required: () => '결정한 내용을 적어 주세요',
     document_not_found: () => '문서를 찾을 수 없어요',
     empty_document: () => '문서 내용이 비어 있어요',
     document_too_long: () => '문서가 너무 길어요',
@@ -67,6 +71,10 @@ const ERRORS = {
     nothing_to_discard: () => 'Nothing to discard',
     nothing_to_share: () => 'No agent message to share',
     nothing_to_unshare: () => 'No shared agent message to take back',
+    decision_not_found: () => 'Decision request not found',
+    decision_closed: () => 'This decision request is already closed',
+    question_required: () => 'Say what needs deciding',
+    answer_required: () => 'Write what you decided',
     document_not_found: () => 'Document not found',
     empty_document: () => 'Document is empty',
     document_too_long: () => 'Document is too long',
@@ -116,6 +124,15 @@ export function systemText(ev: SystemEvent, locale: Locale): string {
     case 'doc_finalized':
       return ko ? `「${ev.title}」 v${ev.version}을 모두 확정했어요` : `Everyone finalized “${ev.title}” v${ev.version}`
   }
+}
+
+/** 결정함에서 정한 답을 채널에 알리는 글(결정한 사람의 이름으로 나간다) */
+export function decisionNotice(locale: Locale, p: { mention: string | null; question: string; answer: string }): string {
+  const q = p.question.replace(/\s+/g, ' ').trim()
+  const quote = q.length > 160 ? q.slice(0, 160) + '…' : q
+  const to = p.mention ? `@${p.mention} ` : ''
+  // 사람 글은 마크다운 없이 그대로 보이므로 꾸밈 기호를 쓰지 않는다
+  return locale === 'ko' ? `${to}[결정] ${p.answer}\n(질문: ${quote})` : `${to}[Decision] ${p.answer}\n(Question: ${quote})`
 }
 
 /** 제목 없이 만든 채널의 이름 */

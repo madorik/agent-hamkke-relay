@@ -19,6 +19,8 @@ export type BusEvent =
   | { t: 'presence'; userId: string }
   | { t: 'user'; userId: string }
   | { t: 'permission'; id: string }
+  /** 결정 요청이 생기거나 바뀜. 결정할 사람의 사람·에이전트 연결에 보낸다 */
+  | { t: 'decision'; id: string }
   /** 작은 이벤트를 그대로 그 사람의 그 종류 연결에 */
   | { t: 'owner'; userId: string; kind: ViewerKind; ev: ServerEvent }
   /** 그 사람의 그 종류 연결을 닫는다(토큰을 새로 받았을 때) */
