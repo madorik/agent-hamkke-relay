@@ -236,6 +236,25 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS decisions_user ON decisions (user_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS decisions_message ON decisions (user_id, message_id) WHERE message_id IS NOT NULL;
+
+-- v3: 할 일. 채널마다, 맡은 사람·기한과 함께. 사람과 에이전트가 같이 만들고 끝낸다.
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL REFERENCES channels(id),
+  title TEXT NOT NULL,
+  assignee_id TEXT,              -- 맡은 사람(없으면 아직 안 정함)
+  due TEXT,                      -- 기한 'YYYY-MM-DD'
+  status TEXT NOT NULL,          -- open | done
+  created_by TEXT NOT NULL,
+  created_by_kind TEXT NOT NULL, -- human | agent
+  message_id TEXT,               -- 이 일이 생긴 메시지(@요청 등)
+  done_by TEXT,
+  done_at BIGINT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tasks_channel ON tasks (channel_id, status);
+CREATE INDEX IF NOT EXISTS tasks_assignee ON tasks (assignee_id, status);
 `
 
 /** 에이전트가 붙어 있나(SQL 식). users 를 u 로 부른 쿼리에 넣는다. */
@@ -243,7 +262,7 @@ export const AGENT_ONLINE = `EXISTS (SELECT 1 FROM agent_conns c WHERE c.user_id
 
 // SCHEMA 를 바꾸면 올린다. 버전이 같으면 DDL 을 아예 돌리지 않는다:
 // CREATE INDEX IF NOT EXISTS 는 인덱스가 있어도 표를 잠가서, 새 인스턴스가 뜰 때마다 돌리면 쓰기와 교착이 난다.
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 async function schemaVersion(q: Pick<pg.PoolClient, 'query'>): Promise<number> {
   const t = await q.query(`SELECT to_regclass('schema_version') AS t`)

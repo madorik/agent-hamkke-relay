@@ -183,6 +183,26 @@ export interface Decision {
   updatedAt: number
 }
 
+/** 할 일: 채널마다, 맡은 사람·기한과 함께. 사람과 에이전트가 같이 만들고 끝낸다 */
+export interface Task {
+  id: string
+  channelId: string
+  title: string
+  /** 맡은 사람(없으면 아직 안 정함) */
+  assigneeId: string | null
+  /** 기한 'YYYY-MM-DD' */
+  due: string | null
+  status: 'open' | 'done'
+  createdBy: string
+  createdByKind: AuthorKind
+  /** 이 일이 생긴 메시지(@요청 등) */
+  messageId: string | null
+  doneBy: string | null
+  doneAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
 export interface Approvals {
   messages: Message[]
   permissions: PermissionRequest[]
@@ -218,6 +238,9 @@ export type ServerEvent =
     }
   /** 내 결정 요청이 생기거나 바뀜. 나의 사람·에이전트 연결에만 보낸다 */
   | { type: 'decision'; decision: Decision }
+  /** 채널의 할 일이 생기거나 바뀜(채널 참여자 모두) */
+  | { type: 'task'; task: Task }
+  | { type: 'task_removed'; taskId: string; channelId: string }
   | { type: 'permission'; request: PermissionRequest }
   | { type: 'permission_verdict'; requestId: string; behavior: 'allow' | 'deny' }
   | { type: 'agent_activity'; activity: AgentActivity }

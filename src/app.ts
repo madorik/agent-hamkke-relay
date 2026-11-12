@@ -18,6 +18,7 @@ import type {
   ServerEvent,
   Stage,
   SystemEvent,
+  Task,
   UploadTicket,
   User,
   ViewerKind,
@@ -115,11 +116,15 @@ function mentionsOf(r: Row): string[] {
   }
 }
 
+/** @모두 · @all · @everyone: 쓴 사람 말고 채널 참여자 모두(각자의 에이전트가 받아 처리한다) */
+const EVERYONE = /(^|[^\p{L}\p{N}_@])@(모두|all|everyone)(?![\p{L}\p{N}_])/iu
+
 /** 본문의 @이름 → 채널 참여자 id. 긴 이름부터 찾아 'Jamie' 가 'Jamie Park' 를 가로채지 않게 한다. */
 async function findMentions(channelId: string, authorId: string, text: string): Promise<string[]> {
   const members = (await all('SELECT u.id, u.name FROM members m JOIN users u ON u.id = m.user_id WHERE m.channel_id = ?', channelId))
     .filter((r) => r.id !== authorId)
     .sort((a, b) => (b.name as string).length - (a.name as string).length)
+  if (EVERYONE.test(text)) return members.map((r) => r.id as string)
   let rest = text
   const ids: string[] = []
   for (const r of members) {
@@ -376,6 +381,13 @@ async function deliver(ev: BusEvent) {
       if (!r) return
       const decision = decisionOf(r)
       for (const c of targets()) if (ownedBy(c, decision.userId)) send(c, { type: 'decision', decision })
+      return
+    }
+    case 'task': {
+      const ok = await memberFilter(ev.channelId)
+      const r = ev.removed ? undefined : await one('SELECT * FROM tasks WHERE id = ?', ev.id)
+      const out: ServerEvent = r ? { type: 'task', task: taskOf(r) } : { type: 'task_removed', taskId: ev.id, channelId: ev.channelId }
+      for (const c of targets()) if (ok(c.viewer)) send(c, out)
       return
     }
     case 'user': {
@@ -1136,6 +1148,141 @@ route('POST', '/decisions/:id/dismiss', async ({ viewer, params }) => {
   await run(`UPDATE decisions SET status = 'dismissed', updated_at = ? WHERE id = ?`, now(), r.id as string)
   await publish({ t: 'decision', id: r.id as string })
   return decisionOf((await one('SELECT * FROM decisions WHERE id = ?', r.id))!)
+})
+
+// ── 할 일 ─────────────────────────────────────────────────────
+// 채널마다 맡은 사람·기한이 있는 할 일. 사람도 에이전트도 만들고 끝낼 수 있다(에이전트는 회의록·@요청에서 뽑는다).
+
+const DUE = /^\d{4}-\d{2}-\d{2}$/
+
+function taskOf(r: Row): Task {
+  return {
+    id: r.id as string,
+    channelId: r.channel_id as string,
+    title: r.title as string,
+    assigneeId: (r.assignee_id as string | null) ?? null,
+    due: (r.due as string | null) ?? null,
+    status: r.status as Task['status'],
+    createdBy: r.created_by as string,
+    createdByKind: r.created_by_kind as Task['createdByKind'],
+    messageId: (r.message_id as string | null) ?? null,
+    doneBy: (r.done_by as string | null) ?? null,
+    doneAt: r.done_at == null ? null : Number(r.done_at),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  }
+}
+
+/** 기한: 'YYYY-MM-DD' 만, 빈 값이면 없음 */
+function cleanDue(v: unknown): string | null {
+  const s = str(v).trim()
+  if (!s) return null
+  if (!DUE.test(s) || Number.isNaN(Date.parse(s))) throw new HttpError(400, 'invalid_due')
+  return s
+}
+
+async function cleanAssignee(channelId: string, v: unknown): Promise<string | null> {
+  const id = str(v)
+  if (!id) return null
+  if (!(await one('SELECT 1 FROM members WHERE channel_id = ? AND user_id = ?', channelId, id))) throw new HttpError(400, 'assignee_not_member')
+  return id
+}
+
+/** 채널의 할 일: 남은 것 모두 + 최근 7일 안에 끝낸 것 */
+route('GET', '/channels/:id/tasks', async ({ viewer, params }) => {
+  await requireMember(params[0], viewer)
+  const rows = await all(
+    `SELECT * FROM tasks WHERE channel_id = ? AND (status = 'open' OR done_at > ?) ORDER BY status DESC, created_at ASC`,
+    params[0],
+    now() - 7 * 24 * 60 * 60_000,
+  )
+  return rows.map(taskOf)
+})
+
+/** 내가 맡은 남은 일(모든 채널) */
+route('GET', '/tasks', async ({ viewer }) => {
+  const rows = await all(
+    `SELECT t.* FROM tasks t JOIN members m ON m.channel_id = t.channel_id AND m.user_id = ?
+     WHERE t.assignee_id = ? AND t.status = 'open' ORDER BY t.due IS NULL, t.due ASC, t.created_at ASC`,
+    viewer.userId,
+    viewer.userId,
+  )
+  return rows.map(taskOf)
+})
+
+route('POST', '/channels/:id/tasks', async ({ viewer, params, body }) => {
+  const channelId = params[0]
+  await requireMember(channelId, viewer)
+  const title = str(body.title).trim().slice(0, 300)
+  if (!title) throw new HttpError(400, 'task_title_required')
+  const assignee = await cleanAssignee(channelId, body.assigneeId)
+  const due = cleanDue(body.due)
+  const messageId = str(body.messageId) || null
+  const id = randomUUID()
+  const t = now()
+  await run(
+    `INSERT INTO tasks (id, channel_id, title, assignee_id, due, status, created_by, created_by_kind, message_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
+    id,
+    channelId,
+    title,
+    assignee,
+    due,
+    viewer.userId,
+    viewer.kind,
+    messageId,
+    t,
+    t,
+  )
+  await publish({ t: 'task', id, channelId })
+  return taskOf((await one('SELECT * FROM tasks WHERE id = ?', id))!)
+})
+
+/** 할 일을 고치거나 끝낸다. 에이전트는 마스터가 맡았거나 마스터 쪽이 만든 일만 */
+async function editableTask(id: string, viewer: Viewer): Promise<Row> {
+  const r = await one('SELECT * FROM tasks WHERE id = ?', id)
+  if (!r || !(await membership(r.channel_id as string, viewer))) throw new HttpError(404, 'task_not_found')
+  if (viewer.kind === 'agent' && r.assignee_id !== viewer.userId && r.created_by !== viewer.userId) throw new HttpError(403, 'humans_only')
+  return r
+}
+
+route('PATCH', '/tasks/:id', async ({ viewer, params, body }) => {
+  const r = await editableTask(params[0], viewer)
+  const channelId = r.channel_id as string
+  const t = now()
+  const sets: string[] = []
+  const vals: (string | number | null)[] = []
+  if (typeof body.title === 'string') {
+    const title = body.title.trim().slice(0, 300)
+    if (!title) throw new HttpError(400, 'task_title_required')
+    sets.push('title = ?')
+    vals.push(title)
+  }
+  if ('assigneeId' in body) {
+    sets.push('assignee_id = ?')
+    vals.push(await cleanAssignee(channelId, body.assigneeId))
+  }
+  if ('due' in body) {
+    sets.push('due = ?')
+    vals.push(cleanDue(body.due))
+  }
+  if (body.status === 'done' || body.status === 'open') {
+    sets.push('status = ?', 'done_by = ?', 'done_at = ?')
+    vals.push(body.status, body.status === 'done' ? viewer.userId : null, body.status === 'done' ? t : null)
+  }
+  if (sets.length) {
+    await run(`UPDATE tasks SET ${sets.join(', ')}, updated_at = ? WHERE id = ?`, ...vals, t, r.id as string)
+    await publish({ t: 'task', id: r.id as string, channelId })
+  }
+  return taskOf((await one('SELECT * FROM tasks WHERE id = ?', r.id))!)
+})
+
+route('DELETE', '/tasks/:id', async ({ viewer, params }) => {
+  requireHuman(viewer)
+  const r = await editableTask(params[0], viewer)
+  await run('DELETE FROM tasks WHERE id = ?', r.id as string)
+  await publish({ t: 'task', id: r.id as string, channelId: r.channel_id as string, removed: true })
+  return { ok: true }
 })
 
 // 에이전트가 스스로 처리해 닫는다(예: 다시 켜져서 요청에 답함). note 는 무엇을 했는지
