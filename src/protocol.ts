@@ -168,6 +168,8 @@ export type ServerEvent =
   /** 내 계정 정보가 바뀜(이름·항상 모두 승인). 나의 사람·에이전트 연결에만 보낸다 */
   | { type: 'user'; user: User }
   | { type: 'message'; message: Message }
+  /** 이제 볼 수 없게 된 메시지(주인이 에이전트 글의 공유를 취소함). 화면에서 지운다 */
+  | { type: 'message_removed'; messageId: string; channelId: string }
   | { type: 'channel'; channel: Channel }
   | { type: 'artifact'; artifact: Artifact }
   | { type: 'artifact_removed'; artifactId: string; channelId: string }

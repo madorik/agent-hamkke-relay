@@ -11,7 +11,8 @@ import { directUrl, run } from './db.js'
 const CHANNEL = 'relay_events'
 
 export type BusEvent =
-  | { t: 'message'; id: string }
+  /** hidden: 공유를 취소해 이제 못 보게 된 참여자에게 지우라고 알린다 */
+  | { t: 'message'; id: string; hidden?: boolean }
   /** userId 가 있으면 그 사람의 그 종류 연결에만 */
   | { t: 'channel'; id: string; userId?: string; kind?: ViewerKind }
   | { t: 'artifact'; id: string; channelId: string }

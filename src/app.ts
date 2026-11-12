@@ -320,7 +320,12 @@ async function deliver(ev: BusEvent) {
       const row = await messageRow(ev.id)
       if (!row) return
       const ok = await memberFilter(row.channel_id as string)
-      for (const c of targets()) if (ok(c.viewer) && canSee(row, c.viewer)) send(c, { type: 'message', message: msgOf(row, c.locale) })
+      for (const c of targets()) {
+        if (!ok(c.viewer)) continue
+        if (canSee(row, c.viewer)) send(c, { type: 'message', message: msgOf(row, c.locale) })
+        // 공유를 취소한 글: 이제 못 보는 사람의 화면에서 지운다
+        else if (ev.hidden) send(c, { type: 'message_removed', messageId: row.id as string, channelId: row.channel_id as string })
+      }
       return
     }
     case 'channel': {
@@ -857,6 +862,63 @@ route('POST', '/messages/:id/reject', async ({ viewer, params }) => {
   })
   if (fileId) await storage.remove(fileId).catch((e) => console.error('[files] remove', e))
   return { ok: true }
+})
+
+// ── 내 에이전트 글을 채널에 공유하기 / 공유 취소 ───────────────
+// 공유: 나에게만 온 답(나만 보기)을 채널에 낸다. 지금 시각으로 올려 모두에게 새 글로 보인다.
+// 공유 취소: 채널에 나간 내 에이전트 글을 다시 나만 보기로 돌린다. 다른 사람 화면에서는 지운다.
+// 사람(주인)이 직접 고르는 일이라 승인·주고받기 제한을 거치지 않는다. 글(text)만 된다.
+
+async function myAgentText(messageId: string, viewer: Viewer, from: Message['visibility'], missing: ErrorCode) {
+  requireHuman(viewer)
+  const first = await one('SELECT channel_id FROM messages WHERE id = ?', messageId)
+  if (!first) throw new HttpError(404, missing)
+  const channelId = first.channel_id as string
+  return {
+    channelId,
+    /** 채널 잠금 안에서 다시 읽는다 */
+    read: async () => {
+      await requireMember(channelId, viewer)
+      const m = await one('SELECT * FROM messages WHERE id = ?', messageId)
+      const ok =
+        m &&
+        m.author_id === viewer.userId &&
+        m.author_kind === 'agent' &&
+        m.kind === 'text' &&
+        m.status === 'sent' &&
+        m.visibility === from
+      if (!ok) throw new HttpError(404, missing)
+      return m
+    },
+  }
+}
+
+route('POST', '/messages/:id/share', async ({ viewer, params }) => {
+  const { channelId, read } = await myAgentText(params[0], viewer, 'private', 'nothing_to_share')
+  const row = await inChannel(channelId, async () => {
+    const m = await read()
+    const t = now()
+    // 본문의 @이름 은 이제 채널 글이라 지목(요청)이 된다
+    const mentions = await findMentions(channelId, viewer.userId, m.body as string)
+    await run(`UPDATE messages SET visibility = 'channel', created_at = ?, mentions = ? WHERE id = ?`, t, JSON.stringify(mentions), m.id as string)
+    await run('UPDATE channels SET updated_at = ? WHERE id = ?', t, channelId)
+    await publish({ t: 'message', id: m.id as string })
+    await publish({ t: 'channel', id: channelId })
+    return (await messageRow(m.id as string))!
+  })
+  return msgOf(row)
+})
+
+route('POST', '/messages/:id/unshare', async ({ viewer, params }) => {
+  const { channelId, read } = await myAgentText(params[0], viewer, 'channel', 'nothing_to_unshare')
+  const row = await inChannel(channelId, async () => {
+    const m = await read()
+    await run(`UPDATE messages SET visibility = 'private', mentions = NULL WHERE id = ?`, m.id as string)
+    await publish({ t: 'message', id: m.id as string, hidden: true })
+    await publish({ t: 'channel', id: channelId })
+    return (await messageRow(m.id as string))!
+  })
+  return msgOf(row)
 })
 
 // 문서
